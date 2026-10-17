@@ -22,8 +22,6 @@ type Stage struct {
 
 // BuildSchedule converts a test specification into traffic stages.
 func BuildSchedule(spec TestSpec) ([]Stage, error) {
-	// TODO (your first exercise): reject MinRPS values less than or equal to zero.
-	// Then add the other input checks before implementing the staircase loop.
 	if spec.MinRPS <= 0 {
 		return nil, errors.New("MinRPS must be greater than zero")
 	}
@@ -36,5 +34,21 @@ func BuildSchedule(spec TestSpec) ([]Stage, error) {
 	if spec.HoldDuration <= 0 {
 		return nil, errors.New("HoldDuration must be greater than zero")
 	}
-	return nil, errors.New("schedule generation is not implemented yet")
+	if spec.MinRPS > spec.PeakRPS {
+		return nil, errors.New("minimum RPS must not exceed peak RPS")
+	}
+
+	var stages []Stage
+	for rate := spec.MinRPS; ; {
+		stages = append(stages, Stage{RPS: rate, Duration: spec.HoldDuration})
+		if rate == spec.PeakRPS {
+			return stages, nil
+		}
+		// Compare the remaining distance before adding to avoid integer overflow.
+		if spec.StepRPS >= spec.PeakRPS-rate {
+			rate = spec.PeakRPS
+		} else {
+			rate += spec.StepRPS
+		}
+	}
 }
