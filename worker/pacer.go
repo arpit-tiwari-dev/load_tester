@@ -119,7 +119,11 @@ func Pace(
 							mu.Lock()
 							summary.Failed++
 							mu.Unlock()
-							fmt.Printf("Error sending request: %v\n", err)
+							if err != nil {
+								fmt.Printf("Request failed: %v\n", err)
+							} else {
+								fmt.Printf("Request returned unsuccessful HTTP status: %d\n", resp.StatusCode)
+							}
 						}
 
 						mu.Lock()
