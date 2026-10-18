@@ -8,6 +8,23 @@ import (
 	"sync"
 )
 
+type Summary struct {
+	Started int
+	Completed int
+	Succeeded int
+	Failed int
+	Skipped int
+	TotalDuration time.Duration
+}
+
+func (s Summary) AverageDuration() time.Duration {
+	if s.Completed == 0 {
+		return 0
+	}
+
+	return s.TotalDuration / time.Duration(s.Completed)
+}
+
 func Pace(
 	ctx context.Context,
 	endpoint string,
@@ -15,33 +32,35 @@ func Pace(
 	rps int,
 	duration time.Duration,
 	maxInFlight int,
-) error {
+) (Summary, error) {
 
 	if rps <= 0 {
-		return fmt.Errorf("RPS must be greater than zero")
+		return Summary{}, fmt.Errorf("RPS must be greater than zero")
 	}
 
 	if duration <= 0 {
-		return fmt.Errorf("duration must be greater than zero")
+		return Summary{}, fmt.Errorf("duration must be greater than zero")
 	}
 
 	if maxInFlight <= 0 {
-		return fmt.Errorf("maxInFlight must be greater than zero")
+		return Summary{},fmt.Errorf("maxInFlight must be greater than zero")
 	}
 
 	if client == nil {
-		return fmt.Errorf("http client must not be nil")
+		return Summary{}, fmt.Errorf("http client must not be nil")
 	}
 
 	if client.Timeout <= 0 {
-		return fmt.Errorf("http client timeout (%s) is not positive", client.Timeout)
+		return Summary{}, fmt.Errorf("http client timeout (%s) is not positive", client.Timeout)
 	}
 
 	interval := time.Second / time.Duration(rps)
 
 	if interval <= 0 {
-		return fmt.Errorf("RPS is too high, resulting in a non-positive interval")
+		return Summary{}, fmt.Errorf("RPS is too high, resulting in a non-positive interval")
 	}
+
+	summary := Summary{}
 
 	deadline := time.Now().Add(duration)
 	ticker := time.NewTicker(interval)
@@ -50,10 +69,10 @@ func Pace(
 	slots := make(chan struct{} , maxInFlight)
 
 	var wg sync.WaitGroup
+	var mu sync.Mutex
 
 	defer ticker.Stop()
 	defer timer.Stop()
-	defer wg.Wait() // Wait for all goroutines to finish before returning
 
 
 	for {
@@ -62,36 +81,67 @@ func Pace(
 			fmt.Println("Tick")
 			if err := ctx.Err(); err != nil {
 				fmt.Println("Context canceled, stopping")
-				return err
+				wg.Wait()
+				return summary, err
 			}
 
 			if !time.Now().Before(deadline) {
 				fmt.Println("Duration elapsed, stopping")
-				return nil
+				wg.Wait()
+				return summary, nil
 			}
 
 			select {
 				case slots <- struct{}{}:
+
+					mu.Lock()
+					summary.Started++
+					mu.Unlock()
+
 					wg.Add(1)
+
 					go func() {
 						defer wg.Done()
 						defer func() { <-slots }() // Release the slot when done
+						defer func() {
+							mu.Lock()
+							summary.Completed++
+							mu.Unlock()
+						}() // Increment completed count when done
 						// Perform the HTTP request here
-						_, err := SendOnce(ctx, client, endpoint)
-						if err != nil {
+						resp, err := SendOnce(ctx, client, endpoint)
+
+						if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+							mu.Lock()
+							summary.Succeeded++
+							mu.Unlock()
+						} else {
+							mu.Lock()
+							summary.Failed++
+							mu.Unlock()
 							fmt.Printf("Error sending request: %v\n", err)
 						}
+
+						mu.Lock()
+						summary.TotalDuration += resp.Duration
+						mu.Unlock()
+						
 					}()
 				
 				default:
+					mu.Lock()
+					summary.Skipped++
+					mu.Unlock()
 					fmt.Println("Max in-flight requests reached, skipping this tick")
 			}
 		case <-timer.C:
 			fmt.Println("Duration elapsed, stopping")
-			return nil
+			wg.Wait()
+			return summary, nil
 		case <-ctx.Done():
 			fmt.Println("Context canceled, stopping")
-			return ctx.Err()
+			wg.Wait()
+			return summary, ctx.Err()
 		}
 	}
 
